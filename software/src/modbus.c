@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: CC-BY-SA-4.0
 #include <string.h>
+#include "usb/usb_cdc.h"
 #include "modbus.h"
 
 static const uint16_t CRC16_VALID = 0x0000;
@@ -11,7 +12,7 @@ modbus_rc modbus_process_frame(modbus_ctx *ctx, uint8_t *buffer, size_t buffer_c
     }
 
     if (buffer_capacity == 0u || *length > buffer_capacity) {
-        return MODBUS_ERROR_ILLEGAL_DATA_VALUE;
+        return MODBUS_ERROR_SLAVE_DEVICE_FAILURE;
     }
 
     if (ctx->register_count > 0u && ctx->registers == NULL) {
@@ -19,11 +20,11 @@ modbus_rc modbus_process_frame(modbus_ctx *ctx, uint8_t *buffer, size_t buffer_c
     }
 
     if (*length < 4) {
-        return MODBUS_ERROR_ILLEGAL_DATA_VALUE;
+        return MODBUS_ERROR_ILLEGAL_FUNCTION;
     }
 
-    uint8_t device_address = (uint8_t)buffer[0];
-    uint8_t function_code = (uint8_t)buffer[1];
+    uint8_t device_address = buffer[0];
+    uint8_t function_code  = buffer[1];
     if (device_address != ctx->device_address) {
         return MODBUS_ERROR_ADDRESS_MISMATCH;
     }
@@ -32,7 +33,7 @@ modbus_rc modbus_process_frame(modbus_ctx *ctx, uint8_t *buffer, size_t buffer_c
     switch (function_code) {
         case MODBUS_FUNC_READ_HOLDING_REGISTERS:
             if (*length != MODBUS_RTU_READ_REQUEST_LEN) {
-                return MODBUS_ERROR_ILLEGAL_DATA_VALUE;
+                return MODBUS_ERROR_ILLEGAL_FUNCTION;
             }
 
             uint16_t crc = modbus_crc16(buffer, *length);
@@ -40,8 +41,8 @@ modbus_rc modbus_process_frame(modbus_ctx *ctx, uint8_t *buffer, size_t buffer_c
                 return MODBUS_ERROR_MEMORY_PARITY_ERROR;
             }
 
-            uint16_t register_address = ((uint16_t)(uint8_t)buffer[2] << 8) | (uint16_t)(uint8_t)buffer[3];
-            uint16_t register_count = ((uint16_t)(uint8_t)buffer[4] << 8) | (uint16_t)(uint8_t)buffer[5];
+            uint16_t register_address = ((uint16_t)buffer[2] << 8) | (uint16_t)buffer[3];
+            uint16_t register_count = ((uint16_t)buffer[4] << 8) | (uint16_t)buffer[5];
 
             if (register_count == 0 || register_count > 125) {
                 return MODBUS_ERROR_ILLEGAL_DATA_ADDRESS;
@@ -52,81 +53,16 @@ modbus_rc modbus_process_frame(modbus_ctx *ctx, uint8_t *buffer, size_t buffer_c
             }
 
             // Binary Search in registers
-            int left = 0;
-            int right = (int)ctx->register_count - 1;
+            unsigned int left = 0, right = ctx->register_count - 1;
+            uint8_t start_index = ctx->register_count;
             
             while (left <= right) {
-                int mid = left + (right - left) / 2;
-                uint16_t mid_address = ctx->registers[mid].register_address;
+                unsigned int mid = left + (right - left) / 2;
+                unsigned int mid_address = ctx->registers[mid].register_address;
                 
                 if (mid_address == register_address) {
-                    size_t start_index = (size_t)mid;
-                    if (start_index + (size_t)register_count > ctx->register_count) {
-                        return MODBUS_ERROR_ILLEGAL_DATA_ADDRESS;
-                    }
-
-                    size_t response_size = 3u + ((size_t)register_count * 2u) + 2u;
-                    if (response_size > buffer_capacity) {
-                        return MODBUS_ERROR_SLAVE_DEVICE_FAILURE;
-                    }
-
-                    // Found the register
-                    // Build response frame
-                    size_t ptr = 0;
-                    buffer[ptr++] = ctx->device_address;
-                    buffer[ptr++] = function_code;
-                    buffer[ptr++] = (uint8_t)(register_count * 2u);
-                    for (size_t i = 0; i < register_count; i++) {
-                        size_t reg_index = start_index + i;
-
-                        if (ctx->registers[reg_index].register_address != (uint16_t)(register_address + i)) {
-                            return MODBUS_ERROR_ILLEGAL_DATA_ADDRESS;
-                        }
-                        switch (ctx->registers[reg_index].type) {
-                            case REG_TYPE_UINT16:
-                            case REG_TYPE_INT16:
-                                buffer[ptr++] = (uint8_t)((ctx->registers[reg_index].value.u16 >> 8) & 0xFFu);
-                                buffer[ptr++] = (uint8_t)(ctx->registers[reg_index].value.u16 & 0xFFu);
-                                break;
-                            case REG_TYPE_UINT32:
-                            case REG_TYPE_INT32:
-                                if ((i + 1u) >= register_count) {
-                                    return MODBUS_ERROR_ILLEGAL_DATA_ADDRESS;
-                                }
-                                if (ctx->registers[reg_index + 1u].register_address != (uint16_t)(register_address + i + 1u)) {
-                                    return MODBUS_ERROR_ILLEGAL_DATA_ADDRESS;
-                                }
-                                buffer[ptr++] = (uint8_t)((ctx->registers[reg_index].value.u32 >> 24) & 0xFFu);
-                                buffer[ptr++] = (uint8_t)((ctx->registers[reg_index].value.u32 >> 16) & 0xFFu);
-                                buffer[ptr++] = (uint8_t)((ctx->registers[reg_index].value.u32 >> 8) & 0xFFu);
-                                buffer[ptr++] = (uint8_t)(ctx->registers[reg_index].value.u32 & 0xFFu);
-                                i++; // Skip next register since we read 2 registers for 32-bit values
-                                break;
-                            case REG_TYPE_FLOAT:
-                                // Assuming IEEE 754 float representation
-                                if ((i + 1u) >= register_count) {
-                                    return MODBUS_ERROR_ILLEGAL_DATA_ADDRESS;
-                                }
-                                if (ctx->registers[reg_index + 1u].register_address != (uint16_t)(register_address + i + 1u)) {
-                                    return MODBUS_ERROR_ILLEGAL_DATA_ADDRESS;
-                                }
-                                uint32_t fval = 0u;
-                                memcpy(&fval, &ctx->registers[reg_index].value.f32, sizeof(fval));
-                                buffer[ptr++] = (uint8_t)((fval >> 24) & 0xFFu);
-                                buffer[ptr++] = (uint8_t)((fval >> 16) & 0xFFu);
-                                buffer[ptr++] = (uint8_t)((fval >> 8) & 0xFFu);
-                                buffer[ptr++] = (uint8_t)(fval & 0xFFu);
-                                i++; // Skip next register since we read 2 registers for float values
-                                break;
-                            default:
-                                return MODBUS_ERROR_ILLEGAL_DATA_VALUE;
-                        }
-                    }
-                    crc = modbus_crc16(buffer, ptr);
-                    buffer[ptr++] = (uint8_t)(crc & 0xFFu);
-                    buffer[ptr++] = (uint8_t)((crc >> 8) & 0xFFu);
-                    *length = ptr;
-                    return MODBUS_SUCCESS;
+                    start_index = mid;
+                    break;
                 }
                 else if (mid_address < register_address) {
                     left = mid + 1;
@@ -134,15 +70,88 @@ modbus_rc modbus_process_frame(modbus_ctx *ctx, uint8_t *buffer, size_t buffer_c
                 else {
                     right = mid - 1;
                 }
-            } 
-            return MODBUS_ERROR_ILLEGAL_DATA_ADDRESS;
+            }
+
+            if (start_index >= ctx->register_count) {
+                return MODBUS_ERROR_ILLEGAL_DATA_ADDRESS;
+            }
+
+            size_t response_size = 3u + ((size_t)register_count * 2u) + 2u;
+            if (response_size > buffer_capacity) {
+                return MODBUS_ERROR_ILLEGAL_DATA_ADDRESS;
+            }
+
+            // Found the register
+            // Build response frame
+            uint8_t ptr = 0;
+            uint8_t reg_index = start_index;
+            uint16_t expected_address = register_address;
+            uint16_t remaining_registers = register_count;
+            buffer[ptr++] = ctx->device_address;
+            buffer[ptr++] = function_code;
+            buffer[ptr++] = (uint8_t)(register_count * 2u);
+            while (remaining_registers > 0u) {
+                if (reg_index >= ctx->register_count) {
+                    return MODBUS_ERROR_ILLEGAL_DATA_ADDRESS;
+                }
+
+                if (ctx->registers[reg_index].register_address != expected_address) {
+                    return MODBUS_ERROR_ILLEGAL_DATA_ADDRESS;
+                }
+
+                switch (ctx->registers[reg_index].type) {
+                    case REG_TYPE_UINT16:
+                    case REG_TYPE_INT16:
+                        buffer[ptr++] = (uint8_t)((ctx->registers[reg_index].value.u16 >> 8) & 0xFFu);
+                        buffer[ptr++] = (uint8_t)(ctx->registers[reg_index].value.u16 & 0xFFu);
+                        expected_address = (uint16_t)(expected_address + 1u);
+                        remaining_registers--;
+                        reg_index++;
+                        break;
+                    case REG_TYPE_UINT32:
+                    case REG_TYPE_INT32:
+                        if (remaining_registers < 2u) {
+                            return MODBUS_ERROR_ILLEGAL_DATA_VALUE;
+                        }
+                        buffer[ptr++] = (uint8_t)((ctx->registers[reg_index].value.u32 >> 24) & 0xFFu);
+                        buffer[ptr++] = (uint8_t)((ctx->registers[reg_index].value.u32 >> 16) & 0xFFu);
+                        buffer[ptr++] = (uint8_t)((ctx->registers[reg_index].value.u32 >> 8) & 0xFFu);
+                        buffer[ptr++] = (uint8_t)(ctx->registers[reg_index].value.u32 & 0xFFu);
+                        expected_address = (uint16_t)(expected_address + 2u);
+                        remaining_registers = (uint16_t)(remaining_registers - 2u);
+                        reg_index++;
+                        break;
+                    case REG_TYPE_FLOAT:
+                        // Assuming IEEE 754 float representation
+                        if (remaining_registers < 2u) {
+                            return MODBUS_ERROR_ILLEGAL_DATA_VALUE;
+                        }
+                        uint32_t fval = 0u;
+                        memcpy(&fval, &ctx->registers[reg_index].value.f32, sizeof(fval));
+                        buffer[ptr++] = (uint8_t)((fval >> 24) & 0xFFu);
+                        buffer[ptr++] = (uint8_t)((fval >> 16) & 0xFFu);
+                        buffer[ptr++] = (uint8_t)((fval >> 8) & 0xFFu);
+                        buffer[ptr++] = (uint8_t)(fval & 0xFFu);
+                        expected_address = expected_address + 2u;
+                        remaining_registers = remaining_registers - 2u;
+                        reg_index++;
+                        break;
+                    default:
+                        return MODBUS_ERROR_ILLEGAL_DATA_VALUE;
+                }
+            }
+            crc = modbus_crc16(buffer, ptr);
+            buffer[ptr++] = (uint8_t)(crc & 0xFFu);
+            buffer[ptr++] = (uint8_t)((crc >> 8) & 0xFFu);
+            *length = ptr;
+            return MODBUS_SUCCESS;
+
         case MODBUS_FUNC_DIAGNOSTICS: // Diagnostics
             // Todo
             return MODBUS_ERROR_ILLEGAL_FUNCTION;
         default:
             return MODBUS_ERROR_ILLEGAL_FUNCTION;
     }
-    return MODBUS_SUCCESS;
 }
 
 uint16_t modbus_crc16(const uint8_t *data, size_t size) {

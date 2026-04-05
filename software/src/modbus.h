@@ -58,4 +58,4 @@ typedef struct {
 } modbus_ctx;
 
 modbus_rc modbus_process_frame(modbus_ctx *ctx, uint8_t *buffer, size_t buffer_capacity, size_t *length);
-extern uint16_t modbus_crc16(const uint8_t *data, size_t size);
+uint16_t modbus_crc16(const uint8_t *data, size_t size);

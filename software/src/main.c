@@ -6,7 +6,6 @@
 #include "gpio.h"
 #include "system.h"
 #include "uart.h"
-#include "uart_port.h"
 #include "usb/usb_cdc.h"
 
 // Modbus
@@ -21,19 +20,20 @@
 
 // 32-bit counter to hold milliseconds since boot
 volatile uint32_t millis_count = 0;
-volatile char cdc_buf[64];
+volatile uint8_t uart_buf[64] = {0};
+volatile __xdata uint8_t cdc_buf[64] = {0};
 
 // modbus
 static modbus_register registers[] = {
-    { .register_address = 0x0000, .value.u16 = 12345 },
-    { .register_address = 0x0001, .value.f32 = 3.14f },
-    { .register_address = 0x0002, .value.i16 = -123 },
+    { .register_address =  0, .type = REG_TYPE_FLOAT, .value.f32 = 230.0f },
+    { .register_address =  2, .type = REG_TYPE_FLOAT, .value.f32 = 231.0f },
+    { .register_address =  4, .type = REG_TYPE_FLOAT, .value.f32 = 232.0f },
 };
 
 static const modbus_ctx ctx = {
     .device_address = 0x01,
     .registers = registers,
-    .register_count = sizeof(registers) / sizeof(registers[0])
+    .register_count = 6,
 };
 
 // Interrupts
@@ -104,7 +104,6 @@ void main(void) {
     PIN_output(PIN_DE);
     PIN_output(PIN_NRE);
 
-    uart_port_init();
     UART0_init();
     UART1_init();
 
@@ -123,6 +122,8 @@ void main(void) {
     uint32_t last_led = millis();
     uint32_t last_uart0 = millis();
 
+    size_t char_cnt = 0;
+
     while (1) {
         if (millis() - last_led >= 1000) { // every 1000ms
             PIN_toggle(PIN_LED0);          // heartbeat LED
@@ -134,58 +135,55 @@ void main(void) {
             last_uart0 = millis();
             PIN_toggle(PIN_LED1);
 
-            uart0_push_byte(UART0_read());
+            uart_buf[char_cnt++] = UART0_read();
         }
         
-        if (millis() - last_uart0 >= MODBUS_PAUSE) {
-            if (uart_port_available(0) > 0) {
-                uint8_t buffer[64];
-                size_t length = 0;
-                while(uart_port_available(0) && length < sizeof(buffer)) {
-                    uart_port_read(0, &buffer[length]);
-                    length++;
-                }
-                CDC_write('<');
-                bytes2hex(buffer, cdc_buf, length);
-                CDC_print(cdc_buf);
-                CDC_write('\n');
+        if (char_cnt > 0 && (millis() - last_uart0 >= MODBUS_PAUSE)) {
+            CDC_write('<');
+            bytes2hex(uart_buf, cdc_buf, char_cnt);
+            CDC_print(cdc_buf);
+            CDC_write('\n');
 
-                modbus_rc ret = modbus_process_frame(&ctx, buffer, sizeof(buffer), &length);
+            modbus_rc ret = modbus_process_frame(&ctx, uart_buf, 64, &char_cnt);
 
-                CDC_write('=');
-                bytes2hex(&ret, cdc_buf, sizeof(ret));
-                CDC_print(cdc_buf);
-                CDC_write('\n');
+            CDC_write('=');
+            bytes2hex(&ret, cdc_buf, sizeof(ret));
+            CDC_print(cdc_buf);
+            CDC_write('\n');
 
-                if (ret != MODBUS_SUCCESS) {
-                    static const uint8_t exception_frame[] = { 0x01, 0x83, 0x01, 0x02, 0x70, 0x61 };
-                    memcpy(buffer, exception_frame, sizeof(exception_frame));
-                    length = sizeof(exception_frame);
-                }
-
-                CDC_write('>');
-                bytes2hex(buffer, cdc_buf, length);
-                CDC_print(cdc_buf);
-                CDC_write('\n');
-
-                INT_ATOMIC_BLOCK {
-                    PIN_high(PIN_NRE);
-                    PIN_high(PIN_DE);
-                    for (size_t i = 0; i < length; i++) {
-                        uart_port_write(0, buffer[i]);
-                    }
-                    PIN_low(PIN_DE);
-                    PIN_low(PIN_NRE);
-                }
-                
-                // if (ret == MODBUS_SUCCESS) {
-                //     for (size_t i = 0; i < length; i++) {
-                //         uart_port_write(0, buffer[i]);
-                //     }
-                // }
+            if (ret != MODBUS_SUCCESS) {
+                size_t ptr = 0;
+                uart_buf[ptr++] = ctx.device_address;
+                uart_buf[ptr++] = uart_buf[1] | 0x80;
+                uart_buf[ptr++] = 1;
+                uart_buf[ptr++] = (uint8_t)ret; // Exception code
+                uint16_t crc = modbus_crc16(uart_buf, ptr);
+                uart_buf[ptr++] = (uint8_t)(crc & 0xFFu);
+                uart_buf[ptr++] = (uint8_t)((crc >> 8) & 0xFF);
+                char_cnt = ptr;
             }
-            uart_port_flush(0);
-            last_uart0 = millis();
+
+            CDC_write('>');
+            bytes2hex(uart_buf, cdc_buf, char_cnt);
+            CDC_print(cdc_buf);
+            CDC_write('\n');
+
+            INT_ATOMIC_BLOCK {
+                PIN_high(PIN_NRE);
+                PIN_high(PIN_DE);
+                for (size_t i = 0; i < char_cnt; i++) {
+                    UART0_write(uart_buf[i]);
+                }
+                PIN_low(PIN_DE);
+                PIN_low(PIN_NRE);
+            }
+            
+            // if (ret == MODBUS_SUCCESS) {
+            //     for (size_t i = 0; i < length; i++) {
+            //         uart_port_write(0, buffer[i]);
+            //     }
+            // }
+            char_cnt = 0;
         }
 
         // unsigned int avail = uart_port_available(0);

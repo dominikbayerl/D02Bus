@@ -282,8 +282,8 @@ void test_read_float_register_pair(void) {
     TEST_ASSERT_EQUAL_INT(expected_float_bits & 0xFF, (uint8_t)buffer[6]);
 }
 
-/* Test: Float register pair requires contiguous addresses */
-void test_read_float_register_pair_non_contiguous(void) {
+/* Test: Next register can start at +2 after a float pair */
+void test_read_float_register_pair_then_next_register(void) {
     modbus_register float_registers[] = {
         { .register_address = 0x0400, .type = REG_TYPE_FLOAT, .value.f32 = -12.75f },
         { .register_address = 0x0402, .type = REG_TYPE_UINT16, .value.u16 = 0x0000 },
@@ -299,13 +299,115 @@ void test_read_float_register_pair_non_contiguous(void) {
     buffer[1] = 0x03;
     buffer[2] = 0x04;  // Register address 0x0400 (big-endian)
     buffer[3] = 0x00;
-    buffer[4] = 0x00;  // Register count = 2 (big-endian)
-    buffer[5] = 0x02;
+    buffer[4] = 0x00;  // Register count = 3 (float consumes two addresses, then read 0x0402)
+    buffer[5] = 0x03;
+    set_crc_in_buffer(buffer, 6);
+
+    int result = modbus_process_frame(&float_ctx, buffer, sizeof(buffer), &buffer_length);
+
+    TEST_ASSERT_EQUAL_INT(MODBUS_SUCCESS, result);
+    TEST_ASSERT_EQUAL_INT(0x06, buffer[2]);
+    TEST_ASSERT_EQUAL_INT(0x00, buffer[7]);
+    TEST_ASSERT_EQUAL_INT(0x00, buffer[8]);
+}
+
+/* Test: 32-bit values cannot be partially read from first address */
+void test_read_float_register_pair_partial_read_rejected(void) {
+    modbus_register float_registers[] = {
+        { .register_address = 0x0400, .type = REG_TYPE_FLOAT, .value.f32 = -12.75f },
+    };
+    modbus_ctx float_ctx = {
+        .device_address = 0x01,
+        .registers = float_registers,
+        .register_count = 1
+    };
+
+    buffer_length = 8;
+    buffer[0] = 0x01;
+    buffer[1] = 0x03;
+    buffer[2] = 0x04;
+    buffer[3] = 0x00; // Register address 0x0400
+    buffer[4] = 0x00;
+    buffer[5] = 0x01; // Partial read request
     set_crc_in_buffer(buffer, 6);
 
     int result = modbus_process_frame(&float_ctx, buffer, sizeof(buffer), &buffer_length);
 
     TEST_ASSERT_EQUAL_INT(MODBUS_ERROR_ILLEGAL_DATA_ADDRESS, result);
+}
+
+/* Test: 32-bit values cannot be read from second register address */
+void test_read_float_register_pair_from_second_address_rejected(void) {
+    modbus_register float_registers[] = {
+        { .register_address = 0x0400, .type = REG_TYPE_FLOAT, .value.f32 = -12.75f },
+    };
+    modbus_ctx float_ctx = {
+        .device_address = 0x01,
+        .registers = float_registers,
+        .register_count = 1
+    };
+
+    buffer_length = 8;
+    buffer[0] = 0x01;
+    buffer[1] = 0x03;
+    buffer[2] = 0x04;
+    buffer[3] = 0x01; // Second address of 0x0400 pair
+    buffer[4] = 0x00;
+    buffer[5] = 0x01;
+    set_crc_in_buffer(buffer, 6);
+
+    int result = modbus_process_frame(&float_ctx, buffer, sizeof(buffer), &buffer_length);
+
+    TEST_ASSERT_EQUAL_INT(MODBUS_ERROR_ILLEGAL_DATA_ADDRESS, result);
+}
+
+/* Test: Read 3 consecutive float registers */
+void test_read_three_consecutive_float_registers(void) {
+    modbus_register float_registers[] = {
+        { .register_address =  0, .type = REG_TYPE_FLOAT, .value.f32 = 230.0f },
+        { .register_address =  2, .type = REG_TYPE_FLOAT, .value.f32 = 231.0f },
+        { .register_address =  4, .type = REG_TYPE_FLOAT, .value.f32 = 232.0f },
+    };
+    modbus_ctx float_ctx = {
+        .device_address = 0x01,
+        .registers = float_registers,
+        .register_count = 6
+    };
+
+    buffer_length = 8;
+    buffer[0] = 0x01;
+    buffer[1] = 0x03;
+    buffer[2] = 0x00;
+    buffer[3] = 0x00; // Register address 0x0000
+    buffer[4] = 0x00;
+    buffer[5] = 0x06; // Register count = 6
+    set_crc_in_buffer(buffer, 6);
+
+    int result = modbus_process_frame(&float_ctx, buffer, sizeof(buffer), &buffer_length);
+    printf("Result: %d, Buffer Length: %zu\n", result, buffer_length);
+
+    TEST_ASSERT_EQUAL_INT(MODBUS_SUCCESS, result);
+    TEST_ASSERT_EQUAL_INT(0x01, buffer[0]);
+    TEST_ASSERT_EQUAL_INT(0x03, buffer[1]);
+    TEST_ASSERT_EQUAL_INT(0x0C, buffer[2]); // Byte count (6 registers = 12 bytes)
+
+    // Check first float (230.0f = 0x43800000)
+    TEST_ASSERT_EQUAL_INT(0x43, buffer[3]);
+    TEST_ASSERT_EQUAL_INT(0x66, buffer[4]);
+    TEST_ASSERT_EQUAL_INT(0x00, buffer[5]);
+    TEST_ASSERT_EQUAL_INT(0x00, buffer[6]);
+
+    // Check second float (231.0f = 0x43670000)
+    TEST_ASSERT_EQUAL_INT(0x43, buffer[7]);
+    TEST_ASSERT_EQUAL_INT(0x67, buffer[8]);
+    TEST_ASSERT_EQUAL_INT(0x00, buffer[9]);
+    TEST_ASSERT_EQUAL_INT(0x00, buffer[10]);
+
+    // Check third float (232.0f = 0x43680000)
+    TEST_ASSERT_EQUAL_INT(0x43, buffer[11]);
+    TEST_ASSERT_EQUAL_INT(0x68, buffer[12]);
+    TEST_ASSERT_EQUAL_INT(0x00, buffer[13]);
+    TEST_ASSERT_EQUAL_INT(0x00, buffer[14]);
 }
 
 /* Test: CRC calculation correctness */
@@ -406,7 +508,10 @@ int main(void) {
     RUN_TEST(test_read_uint32_register_pair);
     RUN_TEST(test_read_int32_register_pair);
     RUN_TEST(test_read_float_register_pair);
-    RUN_TEST(test_read_float_register_pair_non_contiguous);
+    RUN_TEST(test_read_float_register_pair_then_next_register);
+    RUN_TEST(test_read_float_register_pair_partial_read_rejected);
+    RUN_TEST(test_read_float_register_pair_from_second_address_rejected);
+    RUN_TEST(test_read_three_consecutive_float_registers);
     RUN_TEST(test_crc_calculation);
     RUN_TEST(test_crc_null_pointer);
     RUN_TEST(test_empty_frame);
