@@ -75,9 +75,9 @@ inline void UART1_init(void) {
 
 // UART1 read single byte
 inline uint8_t UART1_read(void) {
-  // while(!U1RI);                             // wait for incoming data byte
-  // U1RI = 0;                                 // clear receive complete flag
-  return SBUF1;                             // return the received byte
+  while(!U1RI);
+  U1RI = 0;
+  return SBUF1;
 }
 
 // UART1 write single byte
