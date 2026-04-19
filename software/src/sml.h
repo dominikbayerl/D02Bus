@@ -1,101 +1,85 @@
-// SPDX-License-Identifier: CC-BY-SA-4.0
-#pragma once
+#ifndef SML_H
+#define SML_H
 
 #include <stdint.h>
-#include <stddef.h>
+#include <stdbool.h>
 
-#ifndef __SDCC
-#ifndef __xdata
-#define __xdata
-#endif
-#endif
-
-/**
- * SML return codes
- */
+/* VM Opcodes (Instructions) stored in the instruction stack */
 typedef enum {
-    SML_SUCCESS = 0,
-    SML_ERROR_INVALID_FRAME = 1,
-    SML_ERROR_CRC_MISMATCH = 2,
-    SML_ERROR_OBIS_NOT_FOUND = 3,
-    SML_ERROR_PARSE_ERROR = 4,
-    SML_ERROR_BUFFER_TOO_SMALL = 5,
-} sml_rc;
+    /* Main Frame Opcodes */
+    SML_OP_WAIT_SYNC,           /* Wait for 1B 1B 1B 1B */
+    SML_OP_WAIT_VERSION,        /* Wait for 01 01 01 01 */
+    
+    /* Type-Length Opcodes */
+    SML_OP_READ_TL,             /* Read Type/Length byte */
+    SML_OP_READ_TL_EXT,         /* Read extended Type/Length byte */
 
-/**
- * SML value types
- */
+    /* Branch Opcodes */
+    SML_OP_BRANCH,              /* Conditionally branch based on exact match */
+
+    /* Trailer Opcodes */
+    SML_OP_TRAILER_PADDING,     /* Consume trailing 00 bytes */
+    SML_OP_TRAILER_ESCAPE,      /* Consume 1B 1B 1B 1B */
+    SML_OP_TRAILER_EOF,         /* Consume 1A XX CRC1 CRC2 */
+
+    /* Data Opcodes */
+    SML_OP_READ_BYTES,          /* Read N arbitrary bytes into memory */
+    SML_OP_READ_LIST,           /* Expand list elements based on parsed length */
+
+    /* Output Operations emitted to the main program */
+    SML_OP_OUT_U1,
+    SML_OP_OUT_U2,
+    SML_OP_OUT_U4,
+    SML_OP_OUT_U8,
+    SML_OP_OUT_I1,
+    SML_OP_OUT_I2,
+    SML_OP_OUT_I4,
+    SML_OP_OUT_I8,
+    SML_OP_OUT_STR,
+    SML_OP_OUT_LIST_START,
+    SML_OP_OUT_LIST_END,
+    SML_OP_OUT_EOF,
+
+    SML_OP_DONE                 /* Parsing finished */
+} sml_opcode_t;
+
+/* Types of items parsed from TL fields */
 typedef enum {
-    SML_TYPE_UNSIGNED = 1,
-    SML_TYPE_SIGNED = 2,
-    SML_TYPE_FLOAT = 3,
-    SML_TYPE_STRING = 4,
-    SML_TYPE_TIMESTAMP = 5,
-} sml_value_type_t;
+    SML_TYPE_OCTET_STRING = 0x00,
+    SML_TYPE_BOOLEAN      = 0x40,
+    SML_TYPE_INTEGER      = 0x50,
+    SML_TYPE_UNSIGNED     = 0x60,
+    SML_TYPE_LIST         = 0x70
+} sml_type_t;
 
-/**
- * SML TL (Type-Length) encoded type values
- */
-typedef enum {
-    SML_TL_TYPE_STRING = 0x04,      // Octet string
-    SML_TL_TYPE_SIGNED = 0x05,      // Signed integer
-    SML_TL_TYPE_UNSIGNED = 0x06,    // Unsigned integer
-    SML_TL_TYPE_FLOAT = 0x07,       // Float
-    SML_TL_TYPE_LIST = 0x09,        // List structure
-} sml_tl_type_t;
-
-/**
- * SML frame markers
- */
-typedef enum {
-    SML_FRAME_START_BYTE1 = 0x1B,   // Escape byte
-    SML_FRAME_START_BYTE2 = 0x01,   // Start marker
-    SML_FRAME_END_BYTE1 = 0x1B,     // Escape byte
-    SML_FRAME_END_BYTE2 = 0x1A,     // End marker
-} sml_frame_marker_t;
-
-/**
- * SML value structure - can hold different data types
- */
+/* VM state structure */
 typedef struct {
-    sml_value_type_t type;
-    union {
-        int64_t i64;         // Signed 64-bit integer
-        uint64_t u64;        // Unsigned 64-bit integer
-        float f32;           // 32-bit float
-        uint8_t string[16];  // String (max 16 bytes)
-    } value;
-    uint8_t string_len;      // Length of string if type is STRING
-} sml_value_t;
+    uint8_t memory[32];         /* 32-byte memory filled byte-by-byte */
+    uint8_t stack[32];          /* 32-byte instruction stack */
+    int8_t  sp;                 /* Stack pointer */
+    uint8_t mp;                 /* Memory pointer */
 
-/**
- * Simplified OBIS code structure - 3 bytes identifying the value
- */
-typedef struct {
-    uint8_t code[3];         // Simplified OBIS code (C-D-E)
-    sml_value_t *value;      // Pointer to extracted value
-} sml_obis_t;
+    /* Generic Registers */
+    uint16_t reg_a;             /* Used for parsed length/elements */
+    uint16_t reg_b;             /* Used for remaining bytes to read */
+    uint16_t reg_c;             /* Multi-purpose (Current Type) */
+    uint16_t reg_d;             /* Used for CRC16 calculation */
 
-/**
- * SML parsing context
- */
-typedef struct {
-    const sml_obis_t *obis_list;   // Sorted list of OBIS codes to extract
-    size_t obis_count;             // Number of entries in obis_list
-} sml_ctx_t;
+    /* Current Output Opcode */
+    sml_opcode_t out_op;        
+    uint8_t out_len;            /* Output length (bytes valid in memory) */
+} sml_vm_t;
 
-/**
- * Parse an SML frame from buffer
- * 
- * @param ctx        SML context with OBIS list
- * @param buffer     Input buffer with SML frame
- * @param buffer_len Length of data in buffer
- * @param length     Output: updated length after parsing (remaining unparsed data)
- * @return SML return code
- */
-sml_rc sml_process_frame(__xdata const sml_ctx_t *ctx, __xdata uint8_t *buffer, size_t buffer_len, size_t *length);
+/* VM Initialization */
+void sml_vm_init(sml_vm_t* vm);
 
-/**
- * CRC-16 calculation for SML (X25 polynomial)
- */
-uint16_t sml_crc16(const __xdata uint8_t *bytes, uint8_t len, const uint16_t start);
+/* Push an instruction to the stack */
+void sml_vm_push(sml_vm_t* vm, uint8_t op);
+
+/* Pop an instruction from the stack */
+uint8_t sml_vm_pop(sml_vm_t* vm);
+
+/* Feed one byte into the VM. Returns true if an output instruction was generated. */
+bool sml_vm_step(sml_vm_t* vm, uint8_t b);
+
+#endif /* SML_H */
