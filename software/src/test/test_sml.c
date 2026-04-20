@@ -1,0 +1,110 @@
+#include "sml.h"
+#include <unity.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+void setUp(void) {
+    // set stuff up here
+}
+
+void tearDown(void) {
+    // clean stuff up here
+}
+
+void test_sml_vm_init(void) {
+    sml_vm_t vm;
+    sml_vm_init(&vm);
+    
+    TEST_ASSERT_EQUAL(-1, vm.sp);
+    TEST_ASSERT_EQUAL(0, vm.mp);
+    TEST_ASSERT_EQUAL(0xFFFF, vm.reg_d); // CRC init
+    TEST_ASSERT_EQUAL(SML_OP_DONE, vm.out_op);
+}
+
+void test_sml_basic_sync(void) {
+    sml_vm_t vm;
+    sml_vm_init(&vm);
+    
+    // Push a sync wait op
+    sml_vm_push(&vm, SML_OP_WAIT_SYNC);
+    
+    // Feed 3 sync bytes: 1B 1B 1B
+    TEST_ASSERT_FALSE(sml_vm_step(&vm, 0x1B));
+    TEST_ASSERT_FALSE(sml_vm_step(&vm, 0x1B));
+    TEST_ASSERT_FALSE(sml_vm_step(&vm, 0x1B));
+    
+    // Expected to not have popped the instruction yet
+    TEST_ASSERT_EQUAL(0, vm.sp); 
+    TEST_ASSERT_EQUAL(SML_OP_WAIT_SYNC, vm.stack[0]);
+    
+    // Feed the 4th sync byte
+    TEST_ASSERT_FALSE(sml_vm_step(&vm, 0x1B));
+    
+    // Instruction should be popped
+    TEST_ASSERT_EQUAL(-1, vm.sp);
+}
+
+void test_sml_parse_unsigned(void) {
+    sml_vm_t vm;
+    sml_vm_init(&vm);
+    
+    // Type 60 = Unsigned, Length 2 (1 byte payload + 1 byte type/length) -> 0x62
+    uint8_t payload[] = { 0x62, 0x42 };
+    
+    sml_vm_push(&vm, SML_OP_READ_TL);
+    
+    // Feed type length
+    TEST_ASSERT_FALSE(sml_vm_step(&vm, payload[0]));
+    
+    // Feed data
+    TEST_ASSERT_TRUE(sml_vm_step(&vm, payload[1]));
+    
+    TEST_ASSERT_EQUAL(SML_OP_OUT_U1, vm.out_op);
+    TEST_ASSERT_EQUAL(1, vm.out_len);
+    TEST_ASSERT_EQUAL(0x42, vm.memory[0]);
+}
+
+void test_sml_parse_frame_static(void) {
+    sml_vm_t vm;
+    sml_vm_init(&vm);
+    
+    // Push the standard frame start: Trailer <- [Branch messages] <- Wait Version <- Wait Sync
+    sml_vm_push(&vm, SML_OP_TRAILER_EOF);
+    sml_vm_push(&vm, SML_OP_TRAILER_PADDING);
+    sml_vm_push(&vm, SML_OP_READ_TL);
+    sml_vm_push(&vm, 0x76);
+    sml_vm_push(&vm, SML_OP_BRANCH);
+    sml_vm_push(&vm, SML_OP_WAIT_VERSION);
+    sml_vm_push(&vm, SML_OP_WAIT_SYNC);
+    
+    const uint8_t data[] = {
+        0x1B, 0x1B, 0x1B, 0x1B, 0x01, 0x01, 0x01, 0x01, 0x76, 0x07, 0x49, 0x54, 0x41, 0x30, 0x30, 0x31, 
+        0x62, 0x00, 0x62, 0x00, 0x72, 0x63, 0x07, 0x01, 0x77, 0x01, 0x09, 0x31, 0x31, 0x30, 0x32, 0x31, 
+        0x32, 0x33, 0x34, 0x01, 0x72, 0x62, 0x01, 0x65, 0x4B, 0x8C, 0x03, 0x85, 0x75, 0x77, 0x07, 0x81, 
+        0x81, 0xC7, 0x82, 0x03, 0xFF, 0x01, 0x01, 0x01, 0x01, 0x04, 0x49, 0x54, 0x41, 0x01, 0x77, 0x07, 
+        0x01, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x01, 0x01, 0x01, 0x01, 0x05, 0x11, 0x02, 0x12, 0x34, 0x01, 
+        0x77, 0x07, 0x01, 0x00, 0x01, 0x08, 0x00, 0xFF, 0x01, 0x01, 0x62, 0x1E, 0x52, 0x00, 0x55, 0x00, 
+        0x9D, 0x51, 0xC0, 0x01, 0x77, 0x07, 0x01, 0x00, 0x02, 0x08, 0x00, 0xFF, 0x01, 0x01, 0x62, 0x1E, 
+        0x52, 0x00, 0x55, 0x00, 0x2E, 0x63, 0x01, 0x01, 0x77, 0x07, 0x01, 0x00, 0x0F, 0x07, 0x00, 0xFF, 
+        0x01, 0x01, 0x62, 0x1B, 0x52, 0x00, 0x55, 0x00, 0x00, 0x00, 0x02, 0x01, 0x77, 0x07, 0x01, 0x00, 
+        0x19, 0x07, 0x00, 0xFF, 0x01, 0x01, 0x62, 0x21, 0x52, 0xFD, 0x55, 0x00, 0x00, 0x04, 0xB1, 0x01, 
+        0x01, 0x01, 0x63, 0x6D, 0x61, 0x00, 0x00, 0x00, 0x1B, 0x1B, 0x1B, 0x1B, 0x1A, 0x02, 0xDB, 0x36, 
+    };
+    
+    int out_count = 0;
+    for (size_t i = 0; i < sizeof(data); i++) {
+        if (sml_vm_step(&vm, data[i])) {
+            out_count++;
+        }
+    }
+    TEST_ASSERT_EQUAL(66, out_count);
+}
+
+int main(void) {
+    UNITY_BEGIN();
+    RUN_TEST(test_sml_vm_init);
+    RUN_TEST(test_sml_basic_sync);
+    RUN_TEST(test_sml_parse_unsigned);
+    RUN_TEST(test_sml_parse_frame_static);
+    return UNITY_END();
+}
