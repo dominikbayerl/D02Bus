@@ -129,6 +129,15 @@ else()
         target_link_libraries(vm_debug PRIVATE sml)
     endif()
 
+    # Optional SML GetList.Res debug tool
+    option(BUILD_SML_DEBUG "Build SML debug tool" OFF)
+    if(BUILD_SML_DEBUG)
+        add_executable(sml_debug
+            src/test/sml_debug.c
+        )
+        target_link_libraries(sml_debug PRIVATE sml)
+    endif()
+
     # Enable testing
     enable_testing()
     add_test(NAME modbus_tests COMMAND test_modbus)
