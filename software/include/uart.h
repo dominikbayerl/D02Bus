@@ -8,13 +8,12 @@
 #pragma once
 #include <stdint.h>
 #include "ch554.h"
-#include "config.h"
 
 // UART parameters
 #define UART0_ALTER     0                   // UART0 alternate pins (0:no, 1:yes)
 #define UART1_ALTER     0                   // UART1 alternate pins (0:no, 1:yes)
-#define UART0_BAUD      UART_RS485_BAUD     // UART0 baud rate
-#define UART1_BAUD      UART_D0_BAUD        // UART1 baud rate
+#define UART0_BAUD      9600                // UART0 baud rate
+#define UART1_BAUD      9600                // UART1 baud rate
 
 #define UART0_BAUD_SET  (uint8_t)(256 - (((F_CPU / 8 / UART0_BAUD) + 1) / 2))
 #define UART1_BAUD_SET  (uint8_t)(256 - (((F_CPU / 8 / UART1_BAUD) + 1) / 2))
@@ -43,7 +42,6 @@ inline void UART0_init(void) {
   TR1 = 1;                                  // TIMER1 start
   TI  = 1;                                  // UART0 set transmit complete flag
   REN = 1;                                  // UART0 receive enable
-  // ES  = 1;                                  // UART0 RX interrupt enable
 }
 
 // UART0 read single byte
@@ -55,9 +53,9 @@ inline uint8_t UART0_read(void) {
 
 // UART0 write single byte
 inline void UART0_write(uint8_t data) {
-  TI = 0;
-  SBUF = data;
-  while(!TI);
+  while(!TI);                               // wait for last data byte to be transmitted
+  TI = 0;                                   // clear transmit complete flag
+  SBUF = data;                              // start transmitting data byte
 }
 
 // UART1 setup
@@ -69,20 +67,19 @@ inline void UART1_init(void) {
   U1SMOD = 1;                               // UART1 fast mode
   U1REN  = 1;                               // UART1 receive enable
   SBAUD1 = UART1_BAUD_SET;                  // UART1 set BAUD rate
-  U1TI = 1;                                 // UART1 set transmit complete flag
-  // IE_UART1 = 1;                             // UART1 interrupt enable
+  U1TI   = 1;                               // UART1 set transmit complete flag
 }
 
 // UART1 read single byte
 inline uint8_t UART1_read(void) {
-  while(!U1RI);
-  U1RI = 0;
-  return SBUF1;
+  while(!U1RI);                             // wait for incoming data byte
+  U1RI = 0;                                 // clear receive complete flag
+  return SBUF1;                             // return the received byte
 }
 
 // UART1 write single byte
 inline void UART1_write(uint8_t data) {
-  U1TI = 0;
-  SBUF1 = data;
-  while(!U1TI);
+  while(!U1TI);                             // wait for last data byte to be transmitted
+  U1TI = 0;                                 // clear transmit complete flag
+  SBUF1 = data;                             // start transmitting data byte
 }

@@ -1,0 +1,6 @@
+[submodule "software/src/libsml"]
+	path = software/src/libsml
+	url = git@github.com:volkszaehler/libsml.git
+[submodule "software/src/nanoMODBUS"]
+	path = software/src/nanoMODBUS
+	url = git@github.com:debevv/nanoMODBUS.git
