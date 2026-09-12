@@ -17,7 +17,7 @@ are accepted.
 
 ## Supported OBIS registers
 
-The OBIS-to-Modbus mapping is defined in [`src/modbus_rtu.c`](src/modbus_rtu.c)
+The OBIS-to-Modbus mapping is defined in [`src/meter_values.c`](src/meter_values.c)
 and can be adapted there for another meter. The default mapping is tuned for an
 EFR SGM-C4:
 
@@ -36,12 +36,66 @@ EFR SGM-C4:
 | `1-0:51.7.0*255` | Current L2 | 8 |
 | `1-0:71.7.0*255` | Current L3 | 10 |
 | `1-0:14.7.0*255` | Frequency | 70 |
+| `1-0:81.7.4*255` | Current/voltage angle L1 | Internal calculation input |
+| `1-0:81.7.15*255` | Current/voltage angle L2 | Internal calculation input |
+| `1-0:81.7.26*255` | Current/voltage angle L3 | Internal calculation input |
+
+Offsets are zero-based: offset 0 corresponds to 30001. Each exposed value is a
+32-bit float occupying two registers, high word first. The following values are
+calculated once per CRC-valid SML telegram, before publishing the new bank:
+
+| Measurement | Offsets | Calculation |
+|-------------|---------|-------------|
+| Apparent power L1/L2/L3 (VA) | 18, 20, 22 | `S = V * I` |
+| Reactive power L1/L2/L3 (var), estimated | 24, 26, 28 | `Q = CFG_REACTIVE_SIGN * S * sin(angle)` |
+| Signed power factor L1/L2/L3 | 30, 32, 34 | `P / S`, clamped to -1..1; zero when S is zero |
+| Total apparent power (VA) | 56 | Sum of three phase apparent powers |
+| Total reactive power (var), estimated | 60 | Signed sum of three phase reactive powers |
+
+The angle calculation uses a 182-byte quarter-wave integer lookup table in code
+flash (one-degree steps, scaled by 32767), with integer quadrant folding. There
+are no runtime trigonometric or square-root calls. Basic software float arithmetic
+is still used for products and power-factor division. Modbus reads only serialize
+the stored results. The lookup's absolute sine error at integer degrees is at most
+about 0.000016; meter rounding and waveform distortion dominate the Q estimate.
+
+`CFG_REACTIVE_SIGN` in `include/config.h` defaults to +1, matching direct sine of
+the reported EFR angle. Its direction relative to the Solis reactive-power sign
+convention needs checking with a known reactive load; use -1 to invert it.
+The calculation assumes sinusoidal voltage/current and is not a direct reactive
+power measurement. PF uses measured active power, not cosine of the angle.
+
+Missing inputs leave the affected derived values at zero. Totals require valid
+inputs for all three phases. Angles outside 0..360 degrees are rejected; fractional
+angles are rounded to the nearest degree. Reserved gaps at offsets 54–55 and
+58–59 remain zero, as do other unmapped registers. Reads are limited to 27
+16-bit registers per request; split larger blocks accordingly.
 
 Tariff-specific energy values (`*.8.1` through `*.8.8`) are accumulated when
 the total (`*.8.0`) is not present. The total active power mapping also accepts
 `1-0:1.7.0*255`, which is commonly emitted by EFR meters.
 
 ## Data integrity and memory use
+
+`CFG_MODBUS_MAX_AGE_MS` in `include/config.h` limits the age of the published
+register set (default `10000UL`, configurable from 1 through `0x7fffffff` ms).
+FC03 and FC04 reads return exception `0x04` (Server/Slave Device Failure) before
+the first measurement publication or when the set is older than this limit.
+At exactly 10,000 ms a default-configured set is still accepted; at 10,001 ms it
+is rejected. Exception responses contain the address, function OR `0x80`, code
+`0x04`, and CRC, with no register payload. Request validation takes precedence.
+
+Only CRC-valid telegrams containing at least one of the 13 supported measurement
+fields publish a new bank and refresh its timestamp, even if the values are
+unchanged. Empty or angle-only telegrams do not replace the bank. Invalid or
+incomplete frames do not renew freshness. A new valid measurement publication
+automatically restores normal responses. Missing individual fields in an otherwise
+valid measurement telegram still become zero; freshness applies to the whole set.
+
+The main loop checks the existing atomic systick `millis()` and latches expiration
+until the next publication, so counter rollover cannot revive an expired set.
+Read handling checks again before constructing its response. No new timer or
+ISR work is added. A response already in progress is allowed to finish.
 
 The Modbus readings use a double buffer. While an SML frame is being received,
 the inactive register bank is cleared and decoded values are written into it.
@@ -56,9 +110,13 @@ a 64-byte circular buffer. For a Release build, `firmware.mem` reports:
 
 | Resource | Used | Available | Utilization |
 |----------|-----:|----------:|------------:|
-| Application flash | 8,256 bytes | 14,336 bytes | 57.6% |
-| Physical flash | 8,256 bytes | 16,384 bytes | 50.4% |
-| XRAM | 374 bytes | 1,024 bytes | 36.5% |
+| Application flash | 11,387 bytes | 14,336 bytes | 79.4% |
+| Physical flash | 11,387 bytes | 16,384 bytes | 69.5% |
+| XRAM | 493 bytes | 1,024 bytes | 48.1% |
+
+The USB CDC Debug build uses 14,246 bytes of application flash (90 bytes spare)
+and 504 bytes of XRAM above the 256-byte USB DMA reservation. Release is the
+smaller build for normal operation.
 
 The 14 KiB application limit reserves 2 KiB of physical flash for the bootloader.
 Memory figures can change with the compiler version; always inspect the newly
@@ -82,6 +140,37 @@ All pin assignments and protocol parameters live in
 project intentionally does not use writable Data-Flash for runtime config.
 
 ## Building
+
+Host regression tests use the production SML parser and measurement calculations:
+
+```sh
+cc -std=c99 -DNDEBUG -DHOST_TEST -include tests/host_mocks.h -Itests -Iinclude \
+  tests/test_sml.c src/sml.c src/meter_values.c -lm -o /tmp/d02bus-test-sml
+/tmp/d02bus-test-sml --self-test
+/tmp/d02bus-test-sml --emh-regression
+/tmp/d02bus-test-sml --derived-test
+/tmp/d02bus-test-sml --freshness-test
+cc -std=c99 -fno-strict-aliasing -DHOST_TEST -include tests/host_mocks.h \
+  -Itests -Iinclude tests/test_modbus_freshness.c src/modbus_rtu.c \
+  src/meter_values.c -o /tmp/d02bus-test-freshness
+/tmp/d02bus-test-freshness
+```
+
+The derived test uses a generated SML frame containing the EFR sample, checks
+CRC isolation and missing inputs, and compares all 361 integer angles against
+host `sinf`. Only the host test links libm; the firmware does not.
+Freshness tests cover both read functions and response CRCs, startup, timeout
+boundaries, recovery, missing measurements, corrupted/incomplete SML frames,
+and systick rollover. To exercise another timeout, compile the Modbus test with
+`-DCFG_MODBUS_MAX_AGE_MS=250UL`. The host UART transmitter is mocked; the response
+handler, CRC implementation, and measurement store are production code.
+
+Run `bash tests/run_modbus_sdcc.sh` with SDCC and uCsim s51 installed to test the
+actual 8051-compiled response handler. This catches an SDCC response-length
+miscompilation that host tests cannot detect. It checks the startup exception,
+a 20-register response with nonzero data, CRCs, and an unmapped raw address of
+30000. The latter must return 40 zero data bytes, not an empty response. Client
+requests must use raw offset 0 for register 30001, not raw address 30000.
 
 Required tools on Debian / Ubuntu:
 
@@ -149,6 +238,7 @@ src/
   main.c                  Entry point and top-level loop
   systick.c               Timer2-driven 1 ms tick
   modbus_rtu.c            Modbus RTU slave (UART0, RS-485)
+  meter_values.c          OBIS mapping, buffered values, derived power calculations
   sml.c                   SML telegram parser (UART1)
   delay.c                 CH552 delay routines (from wagiminator)
   cdc_debug.c             USB CDC debug logging (Debug builds)

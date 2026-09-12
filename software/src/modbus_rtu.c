@@ -17,48 +17,12 @@ volatile __xdata uint32_t modbus_rx_last_time = 0;
 // The legacy delay implementation waits on the touch-key peripheral, which
 // this firmware does not configure.  Use the running Timer2 millisecond tick
 // so UART1 interrupts continue filling the SML ring during Modbus guard times.
+#ifndef HOST_TEST
 static void modbus_wait_ms(uint16_t delay_ms) {
     const uint32_t start = millis();
     while (MS_ELAPSED(start) < delay_ms) {}
 }
-
-// Array storing the immutable OBIS-to-SDM630 mapping in code flash.
-__code const MODBUS_REGISTER_MAPPING modbus_registers[SUPPORTED_OBIS_CODES_NUMBER] = {
-    {{0x01, 0x00, 0x01, 0x08, 0x00, 0xFF}, 72}, // Active Energy + T0
-    {{0x01, 0x00, 0x02, 0x08, 0x00, 0xFF}, 74}, // Active Energy - T0
-    {{0x01, 0x00, 0x10, 0x07, 0x00, 0xFF}, 52}, // Active Power Total
-    {{0x01, 0x00, 0x24, 0x07, 0x00, 0xFF}, 12}, // Active Power L1
-    {{0x01, 0x00, 0x38, 0x07, 0x00, 0xFF}, 14}, // Active Power L2
-    {{0x01, 0x00, 0x4C, 0x07, 0x00, 0xFF}, 16}, // Active Power L3
-    {{0x01, 0x00, 0x20, 0x07, 0x00, 0xFF},  0}, // Voltage L1
-    {{0x01, 0x00, 0x34, 0x07, 0x00, 0xFF},  2}, // Voltage L2
-    {{0x01, 0x00, 0x48, 0x07, 0x00, 0xFF},  4}, // Voltage L3
-    {{0x01, 0x00, 0x1F, 0x07, 0x00, 0xFF},  6}, // Current L1
-    {{0x01, 0x00, 0x33, 0x07, 0x00, 0xFF},  8}, // Current L2
-    {{0x01, 0x00, 0x47, 0x07, 0x00, 0xFF}, 10}, // Current L3
-    {{0x01, 0x00, 0x0E, 0x07, 0x00, 0xFF}, 70}  // Frequency
-};
-
-__xdata float modbus_values[2][SUPPORTED_OBIS_CODES_NUMBER];
-volatile __xdata uint8_t modbus_active_buffer = 0;
-static __xdata uint8_t modbus_staging_buffer = 1;
-
-void modbus_staging_begin(void) {
-    modbus_staging_buffer = modbus_active_buffer ^ 1;
-    for (uint8_t i = 0; i < SUPPORTED_OBIS_CODES_NUMBER; i++) {
-        modbus_values[modbus_staging_buffer][i] = 0.0f;
-    }
-}
-
-void modbus_staging_write(uint8_t mapping_index, float value) {
-    if (mapping_index < SUPPORTED_OBIS_CODES_NUMBER) {
-        modbus_values[modbus_staging_buffer][mapping_index] = value;
-    }
-}
-
-void modbus_staging_commit(void) {
-    modbus_active_buffer = modbus_staging_buffer;
-}
+#endif
 
 // Modbus CRC-16 Lookup Table in Flash
 static __code const uint16_t crc_table[] = {
@@ -97,6 +61,7 @@ static __code const uint16_t crc_table[] = {
 };
 
 // Initialize UART0 for Modbus RTU
+#ifndef HOST_TEST
 void modbus_init(void) {
     // Configure RXD0 (P3.0) and TXD0 (P3.1)
     PIN_input_PU(P30);
@@ -205,6 +170,7 @@ void modbus_tx_send(const uint8_t *bytes, uint8_t number) {
 
 // Address configurations (compile-time in port)
 void modbus_adr_set(void) {}
+#endif // HOST_TEST supplies the UART transmitter; protocol code below is shared.
 
 uint8_t modbus_adr_get(void) {
     return CFG_MODBUS_ADDRESS;
@@ -227,6 +193,7 @@ uint16_t modbus_crc_calc(const uint8_t *bytes, uint8_t number, const uint16_t st
 }
 
 // Check if a complete Modbus frame is available (checks for character gap timeout first)
+#ifndef HOST_TEST
 uint8_t modbus_frame_avail(void) {
     ES = 0; // Enter critical section
     if (modbus_rx_number > 0 && !modbus_frame_available) {
@@ -242,10 +209,12 @@ uint8_t modbus_frame_avail(void) {
     ES = 1; // Exit critical section
     return temp;
 }
+#endif
 
 // Analyze Modbus frame and send response
 uint8_t modbus_frame_send(const uint8_t *bytes, const uint8_t number) {
     uint8_t status = 0;
+    uint8_t exception;
     
     if (number == 8 && bytes[0] == modbus_adr_get() &&
         !modbus_crc_calc(bytes, number, 0xffff)) {
@@ -254,11 +223,18 @@ uint8_t modbus_frame_send(const uint8_t *bytes, const uint8_t number) {
             const uint16_t reg_count = ((uint16_t)bytes[4] << 8) | bytes[5];
             const uint16_t address_last = address_first + reg_count - 1;
             
-            const uint16_t data_byte_number = 2 * reg_count;
             static __xdata uint8_t res[60]; // Safe array size in XRAM
             
-            if (reg_count != 0 && data_byte_number <= 54 &&
+            if (reg_count != 0 && reg_count <= 27 &&
                 address_last >= address_first) {
+                if (!modbus_values_fresh()) {
+                    exception = 0x04; // Server Device Failure: no fresh measurements
+                    goto send_exception;
+                }
+                // Compute only after validating the count, at its actual wire
+                // width. SDCC miscompiles the earlier uint16_t expression to
+                // zero when it is kept across the count/freshness checks.
+                const uint8_t data_byte_number = (uint8_t)reg_count * 2;
                 res[0] = bytes[0];
                 res[1] = bytes[1]; // Echo requested Function Code
                 res[2] = (uint8_t)data_byte_number;
@@ -268,7 +244,9 @@ uint8_t modbus_frame_send(const uint8_t *bytes, const uint8_t number) {
                 
                 for (uint16_t reg = address_first; reg <= address_last; reg++) {
                     uint8_t found = 0;
-                    for (uint8_t i = 0; i < SUPPORTED_OBIS_CODES_NUMBER; i++) {
+                    for (uint8_t i = 0; i < MODBUS_VALUE_COUNT; i++) {
+                        if (modbus_registers[i].modbus_register == MODBUS_INTERNAL_ONLY)
+                            continue;
                         if (modbus_registers[i].modbus_register == reg) {
                             uint16_t *val_ptr = (uint16_t*)&modbus_values[value_buffer][i];
                             res[byte_idx++] = (uint8_t)(val_ptr[1] >> 8);
@@ -296,22 +274,19 @@ uint8_t modbus_frame_send(const uint8_t *bytes, const uint8_t number) {
                 modbus_tx_send(res, 5 + data_byte_number);
                 status = bytes[1];
             } else {
-                // Illegal Data Address
-                uint8_t response[5] = {bytes[0], bytes[1] | 0x80, 0x02};
-                uint16_t crc = modbus_crc_calc(response, 3, 0xffff);
-                response[3] = (uint8_t)crc;
-                response[4] = (uint8_t)(crc >> 8);
-                modbus_tx_send(response, 5);
-                status = bytes[1] | 0x80;
+                exception = 0x02; // Illegal Data Address
+                goto send_exception;
             }
         }
         else { // Illegal Function Code
-            uint8_t response[5] = {bytes[0], bytes[1] | 0x80, 0x01};
+            exception = 0x01;
+send_exception: ;
+            uint8_t response[5] = {bytes[0], bytes[1] | 0x80, exception};
             uint16_t crc = modbus_crc_calc(response, 3, 0xffff);
             response[3] = (uint8_t)crc;
             response[4] = (uint8_t)(crc >> 8);
             modbus_tx_send(response, 5);
-            status = 0x01;
+            status = exception == 0x01 ? 0x01 : bytes[1] | 0x80;
         }
     }
     return status;

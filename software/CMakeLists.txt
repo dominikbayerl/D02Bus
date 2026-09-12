@@ -56,6 +56,7 @@ find_program(SDCC_MAKEBIN NAMES sdcc-makebin   makebin   REQUIRED)
 set(SOURCES
     src/main.c
     src/modbus_rtu.c
+    src/meter_values.c
     src/sml.c
     src/systick.c
     src/delay.c

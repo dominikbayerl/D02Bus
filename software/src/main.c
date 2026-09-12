@@ -136,6 +136,8 @@ void main(void) {
     INT_enable();
 
     while (1) {
+        // Latch expiry even without requests, including across millis() wrap.
+        modbus_values_fresh();
         // A complete Modbus frame was received
         if (modbus_frame_avail()) {
             uint8_t frame_len = modbus_rx_avail();

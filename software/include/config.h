@@ -25,6 +25,13 @@
 #endif
 
 // ----- Modbus serial parameters -----
+#ifndef CFG_MODBUS_MAX_AGE_MS
+#define CFG_MODBUS_MAX_AGE_MS    10000UL
+#endif
+#if CFG_MODBUS_MAX_AGE_MS == 0 || CFG_MODBUS_MAX_AGE_MS >= 0x80000000UL
+#error CFG_MODBUS_MAX_AGE_MS must be between 1 and 0x7fffffff milliseconds
+#endif
+
 #ifndef CFG_MODBUS_BAUD
 #define CFG_MODBUS_BAUD         9600UL
 #endif
@@ -54,6 +61,12 @@
 
 // Selects which active power source feeds the totals (0 = SML message, 1 = local)
 #define CFG_POWER_SOURCE        0
+
+// Q estimate = sign * V * I * sin(reported EFR phase angle).
+// Set -1 if commissioning against a known reactive load requires inversion.
+#ifndef CFG_REACTIVE_SIGN
+#define CFG_REACTIVE_SIGN       1
+#endif
 
 // Measurement interval mode (0 = SML auto, anything else = local override)
 #define CFG_INTERVAL_MODE       0
