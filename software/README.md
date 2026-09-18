@@ -172,6 +172,12 @@ a 20-register response with nonzero data, CRCs, and an unmapped raw address of
 30000. The latter must return 40 zero data bytes, not an empty response. Client
 requests must use raw offset 0 for register 30001, not raw address 30000.
 
+Run `python3 tests/run_systick_sdcc.py` to test the production Timer2 handler and
+`millis()` under SDCC/uCsim. It injects a higher-priority interrupt between counter
+byte writes at 8-, 16-, 24- and 32-bit rollover boundaries, and checks that reads
+preserve the caller's interrupt-enable state. The simulator uses INT0 to model
+UART1's priority because its C52 model does not include the CH552 UART1 peripheral.
+
 Required tools on Debian / Ubuntu:
 
 ```sh

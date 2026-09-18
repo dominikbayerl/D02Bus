@@ -38,7 +38,12 @@ void general_init(void) {
 // Timer2 Overflow Interrupt Service Routine
 void systick_isr(void) __interrupt (INT_NO_TMR2) {
     TF2 = 0; // Clear the overflow interrupt flag
+    // UART1 has higher priority and calls millis(). Prevent it from reading
+    // a partially stored 32-bit count during a byte carry (e.g. 0xff -> 0x100).
+    const uint8_t irq_enabled = EA;
+    EA = 0;
     sys_millis_count++;
+    EA = irq_enabled;
 }
 
 // UART0 Receive Interrupt Service Routine
